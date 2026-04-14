@@ -1,4 +1,4 @@
-from fastapi import FastAPI, File, UploadFile, Query, Request
+from fastapi import FastAPI, Query, Request
 from fastapi.responses import JSONResponse
 from datetime import datetime
 from typing import List, Dict
@@ -58,7 +58,6 @@ def predict_on_square(square: np.ndarray) -> List[Dict[str, int]]:
 @app.post("/detect")
 async def detect_objects(
     request: Request,
-    file: UploadFile | None = File(None),
     square_size: int = Query(DEFAULT_SQUARE_SIZE, description="Tamanho do square em pixels"),
 ):
     content_type = request.headers.get("content-type", "")
@@ -92,13 +91,17 @@ async def detect_objects(
                 content={"error": "Não foi possível baixar a imagem da URL informada."}
             )
     else:
-        if file is None:
+        form_data = await request.form()
+        file = form_data.get("file")
+
+        if file is None or not hasattr(file, "read"):
             return JSONResponse(
                 status_code=422,
                 content={"error": "Envie file multipart ou imageUrl em JSON."}
             )
-        incoming_filename = file.filename
-        incoming_mime = file.content_type
+
+        incoming_filename = getattr(file, "filename", incoming_filename)
+        incoming_mime = getattr(file, "content_type", "application/octet-stream")
         image_bytes = await file.read()
 
     logger.info(f"Recebendo arquivo: {incoming_filename}, square_size={square_size}")
