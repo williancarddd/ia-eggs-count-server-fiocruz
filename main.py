@@ -33,6 +33,14 @@ logger.info(f"Modelo YOLO carregado: {MODEL_PATH}")
 
 app = FastAPI()
 
+
+def response_422(message: str):
+    logger.warning(f"422 detect_objects: {message}")
+    return JSONResponse(
+        status_code=422,
+        content={"error": message}
+    )
+
 def normalize_square(square: np.ndarray) -> np.ndarray:
     """Aplica o mesmo filtro de normalização (gamma correction)."""
     return exposure.adjust_gamma(square, gamma=1.5)
@@ -61,48 +69,52 @@ async def detect_objects(
     square_size: int = Query(DEFAULT_SQUARE_SIZE, description="Tamanho do square em pixels"),
 ):
     content_type = request.headers.get("content-type", "")
+    client_host = request.client.host if request.client else "unknown"
+    logger.info(f"Request detect_objects from={client_host} content_type={content_type} square_size={square_size}")
     incoming_filename = "remote-image.jpg"
 
     if "application/json" in content_type:
-        payload = await request.json()
+        try:
+            payload = await request.json()
+        except Exception as exc:
+            logger.warning(f"Falha ao ler JSON: {exc}")
+            return response_422("Payload JSON inválido.")
+
+        logger.info(f"Payload JSON keys={list(payload.keys())}")
         image_url = payload.get("imageUrl")
         if not image_url:
-            return JSONResponse(
-                status_code=422,
-                content={"error": "Campo imageUrl é obrigatório quando enviar JSON."}
-            )
+            return response_422("Campo imageUrl é obrigatório quando enviar JSON.")
 
         parsed_url = urlparse(image_url)
         if parsed_url.scheme not in ("http", "https"):
-            return JSONResponse(
-                status_code=422,
-                content={"error": "imageUrl deve usar protocolo http/https."}
-            )
+            return response_422("imageUrl deve usar protocolo http/https.")
+
+        logger.info(f"Baixando imageUrl host={parsed_url.netloc} path={parsed_url.path}")
 
         try:
             req = UrlRequest(image_url, headers={"User-Agent": "ia-eggs-count-server/1.0"})
             with urlopen(req, timeout=30) as response:
                 image_bytes = response.read()
                 incoming_mime = response.headers.get("Content-Type", "image/jpeg")
+                logger.info(
+                    f"Download concluído status={response.status} bytes={len(image_bytes)} mime={incoming_mime}"
+                )
             incoming_filename = parsed_url.path.split("/")[-1] or incoming_filename
-        except Exception:
-            return JSONResponse(
-                status_code=422,
-                content={"error": "Não foi possível baixar a imagem da URL informada."}
-            )
+        except Exception as exc:
+            logger.warning(f"Erro no download da imageUrl: {exc}")
+            return response_422("Não foi possível baixar a imagem da URL informada.")
     else:
         form_data = await request.form()
+        logger.info(f"Payload form keys={list(form_data.keys())}")
         file = form_data.get("file")
 
         if file is None or not hasattr(file, "read"):
-            return JSONResponse(
-                status_code=422,
-                content={"error": "Envie file multipart ou imageUrl em JSON."}
-            )
+            return response_422("Envie file multipart ou imageUrl em JSON.")
 
         incoming_filename = getattr(file, "filename", incoming_filename)
         incoming_mime = getattr(file, "content_type", "application/octet-stream")
         image_bytes = await file.read()
+        logger.info(f"Arquivo multipart recebido filename={incoming_filename} bytes={len(image_bytes)} mime={incoming_mime}")
 
     logger.info(f"Recebendo arquivo: {incoming_filename}, square_size={square_size}")
 
