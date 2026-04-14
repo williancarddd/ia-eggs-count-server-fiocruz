@@ -1,4 +1,4 @@
-from fastapi import FastAPI, File, UploadFile, Query
+from fastapi import FastAPI, File, UploadFile, Query, Request
 from fastapi.responses import JSONResponse
 from datetime import datetime
 from typing import List, Dict
@@ -12,6 +12,8 @@ import platform
 import psutil
 import hashlib
 import time
+from urllib.request import Request as UrlRequest, urlopen
+from urllib.parse import urlparse
 
 # Configurar logger
 logger = logging.getLogger("egg-counter-api")
@@ -55,31 +57,71 @@ def predict_on_square(square: np.ndarray) -> List[Dict[str, int]]:
 
 @app.post("/detect")
 async def detect_objects(
-    file: UploadFile = File(...),
+    request: Request,
+    file: UploadFile | None = File(None),
     square_size: int = Query(DEFAULT_SQUARE_SIZE, description="Tamanho do square em pixels"),
 ):
-    logger.info(f"Recebendo arquivo: {file.filename}, square_size={square_size}")
+    content_type = request.headers.get("content-type", "")
+    incoming_filename = "remote-image.jpg"
+
+    if "application/json" in content_type:
+        payload = await request.json()
+        image_url = payload.get("imageUrl")
+        if not image_url:
+            return JSONResponse(
+                status_code=422,
+                content={"error": "Campo imageUrl é obrigatório quando enviar JSON."}
+            )
+
+        parsed_url = urlparse(image_url)
+        if parsed_url.scheme not in ("http", "https"):
+            return JSONResponse(
+                status_code=422,
+                content={"error": "imageUrl deve usar protocolo http/https."}
+            )
+
+        try:
+            req = UrlRequest(image_url, headers={"User-Agent": "ia-eggs-count-server/1.0"})
+            with urlopen(req, timeout=30) as response:
+                image_bytes = response.read()
+                incoming_mime = response.headers.get("Content-Type", "image/jpeg")
+            incoming_filename = parsed_url.path.split("/")[-1] or incoming_filename
+        except Exception:
+            return JSONResponse(
+                status_code=422,
+                content={"error": "Não foi possível baixar a imagem da URL informada."}
+            )
+    else:
+        if file is None:
+            return JSONResponse(
+                status_code=422,
+                content={"error": "Envie file multipart ou imageUrl em JSON."}
+            )
+        incoming_filename = file.filename
+        incoming_mime = file.content_type
+        image_bytes = await file.read()
+
+    logger.info(f"Recebendo arquivo: {incoming_filename}, square_size={square_size}")
 
     start_request = datetime.utcnow()
     time_start_total = time.time()
 
     # Validação da extensão
-    if not file.filename.lower().endswith((".jpg", ".jpeg", ".jpge")):
-        logger.warning(f"Arquivo inválido recebido: {file.filename}")
+    if not incoming_filename.lower().endswith((".jpg", ".jpeg", ".jpge", ".png")):
+        logger.warning(f"Arquivo inválido recebido: {incoming_filename}")
         return JSONResponse(
             status_code=400,
-            content={"error": "Formato de arquivo inválido. Use jpg, jpeg ou jpge."}
+            content={"error": "Formato de arquivo inválido. Use jpg, jpeg, jpge ou png."}
         )
 
     # Lê e decodifica a imagem
     time_start_read = time.time()
-    image_bytes = await file.read()
     nparr = np.frombuffer(image_bytes, np.uint8)
     image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     time_end_read = time.time()
 
     if image is None:
-        logger.error(f"Falha ao decodificar imagem: {file.filename}")
+        logger.error(f"Falha ao decodificar imagem: {incoming_filename}")
         return JSONResponse(
             status_code=400,
             content={"error": "Não foi possível decodificar a imagem."}
@@ -142,13 +184,13 @@ async def detect_objects(
             "totalTimeMs": round((time_end_total - time_start_total) * 1000, 2),
         },
         "image": {
-            "filename": file.filename,
+            "filename": incoming_filename,
             "fileSize": len(image_bytes),
             "dimensions": {
                 "width": img_width,
                 "height": img_height
             },
-            "mimeType": file.content_type,
+            "mimeType": incoming_mime,
             "hashMD5": file_hash_md5
         },
         "inferenceStats": {
