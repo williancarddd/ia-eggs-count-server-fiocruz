@@ -24,7 +24,7 @@ console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
 # Configurações iniciais
-DEFAULT_SQUARE_SIZE = 254
+DEFAULT_SQUARE_SIZE = 384
 MODEL_PATH = "./best-train2.onnx"
 
 # Carrega o modelo YOLO
